@@ -1,0 +1,17 @@
+# Dépendances et builds
+node_modules/
+dist/
+coverage/
+
+# Client Prisma généré (recréé par `npm run db:generate`)
+src/generated/
+
+# Variables d'environnement : jamais dans le dépôt
+.env
+.env.*
+!.env.example
+
+# Journaux et fichiers système
+*.log
+.DS_Store
+Thumbs.db

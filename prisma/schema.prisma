@@ -1,0 +1,530 @@
+// Schéma de la base de données.
+// Tables issues de la partie 2 de documents/FEUILLE-DE-ROUTE-PRODUCTION.md (F1 à F13).
+// L'URL de connexion est définie dans prisma.config.ts, à partir de la variable DATABASE_URL.
+//
+// Conventions :
+// - modèles en PascalCase et champs en camelCase côté code, tables et colonnes en snake_case
+//   côté base (@@map / @map) ;
+// - identifiants UUID v7 : pas de compteur global, et triables par date de création ;
+// - montants en Decimal(12, 2), mesures en Decimal, dates en timestamptz (UTC) ;
+// - agences et lieux sont des tables de référence, remplies par le seeder des lieux ;
+// - les contraintes CHECK, que Prisma ne sait pas décrire, sont ajoutées en SQL dans la
+//   migration initiale.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== ENUMS ====================
+
+enum UserRole {
+  admin
+  manager
+  collector
+
+  @@map("user_role")
+}
+
+enum UserTokenPurpose {
+  invitation
+  password_reset
+  email_change
+
+  @@map("user_token_purpose")
+}
+
+enum TransportMode {
+  sea
+  air
+
+  @@map("transport_mode")
+}
+
+enum PackageStatus {
+  registered
+  in_transit
+  arrived
+  delivered
+  returned
+  on_hold
+  cancelled
+
+  @@map("package_status")
+}
+
+enum PaymentStatus {
+  unpaid
+  partial
+  paid
+
+  @@map("payment_status")
+}
+
+enum PaymentMethod {
+  cash
+  transfer
+  mobile_money
+  other
+
+  @@map("payment_method")
+}
+
+enum ShipmentStatus {
+  planned
+  loading
+  in_transit
+  customs
+  arrived
+  unloaded
+
+  @@map("shipment_status")
+}
+
+enum NotificationCategory {
+  package
+  payment
+  email
+
+  @@map("notification_category")
+}
+
+enum EmailDeliveryStatus {
+  queued
+  sent
+  failed
+  skipped
+
+  @@map("email_delivery_status")
+}
+
+// ==================== RÉFÉRENCES : LIEUX ET AGENCES ====================
+
+/// Ville du réseau BTS : hub de départ, destination, ou les deux.
+model Location {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  /// Code court et stable, utilisé par les imports (ex. CI-ABJ).
+  code          String   @unique @db.VarChar(12)
+  /// Libellé affiché, ex. « Abidjan (Côte d'Ivoire) ».
+  name          String   @unique @db.VarChar(80)
+  /// Code pays ISO 3166-1 alpha-2, repris dans le numéro de suivi.
+  countryCode   String   @map("country_code") @db.Char(2)
+  isOrigin      Boolean  @default(false) @map("is_origin")
+  isDestination Boolean  @default(false) @map("is_destination")
+  /// Un lieu n'est jamais supprimé : il est désactivé, pour garder l'historique des colis.
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  agencies             Agency[]
+  originPackages       Package[]      @relation("PackageOrigin")
+  destinationPackages  Package[]      @relation("PackageDestination")
+  originShipments      Shipment[]     @relation("ShipmentOrigin")
+  destinationShipments Shipment[]     @relation("ShipmentDestination")
+  packageEvents        PackageEvent[]
+
+  @@map("locations")
+}
+
+/// Point opérationnel de BTS, rattaché à une ville. Limite ce qu'un collecteur peut voir.
+model Agency {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  code       String   @unique @db.VarChar(12)
+  name       String   @unique @db.VarChar(80)
+  locationId String   @map("location_id") @db.Uuid
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  location Location  @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  users    User[]
+  clients  Client[]
+  packages Package[]
+
+  @@index([locationId])
+  @@map("agencies")
+}
+
+// ==================== F1, F2, F3 : COMPTES ET SESSIONS ====================
+
+/// Compte du personnel. Jamais supprimé : archivé (archivedAt), pour garder les colis,
+/// paiements et événements qui y sont rattachés.
+model User {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  name         String    @db.VarChar(120)
+  /// Sans espaces autour et en minuscules (contrainte CHECK) : l'unicité ignore donc la casse.
+  email        String    @unique @db.VarChar(254)
+  phone        String?   @db.VarChar(30)
+  role         UserRole
+  agencyId     String    @map("agency_id") @db.Uuid
+  /// Vide tant que la personne invitée n'a pas choisi son mot de passe.
+  passwordHash String?   @map("password_hash") @db.VarChar(255)
+  active       Boolean   @default(true)
+  archivedAt   DateTime? @map("archived_at") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  agency            Agency             @relation(fields: [agencyId], references: [id], onDelete: Restrict)
+  refreshTokens     RefreshToken[]
+  tokens            UserToken[]
+  collectedPackages Package[]          @relation("PackageCollector")
+  packageEvents     PackageEvent[]
+  recordedPayments  Payment[]
+  pricingRates      PricingRate[]
+  notificationReads NotificationRead[]
+  auditLogs         AuditLog[]
+  quotes            Quote[]
+
+  @@index([role, active])
+  @@index([agencyId])
+  @@map("users")
+}
+
+/// Jeton de rafraîchissement, stocké haché. Tous les jetons issus d'une même connexion
+/// partagent une famille : la réutilisation d'un jeton déjà remplacé révoque toute la famille.
+model RefreshToken {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  familyId   String    @map("family_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(128)
+  userAgent  String?   @map("user_agent") @db.VarChar(255)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  replacedAt DateTime? @map("replaced_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+/// Lien à usage unique envoyé par e-mail : invitation, mot de passe oublié, changement d'e-mail.
+model UserToken {
+  id        String           @id @default(uuid(7)) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  purpose   UserTokenPurpose
+  tokenHash String           @unique @map("token_hash") @db.VarChar(128)
+  /// Nouvelle adresse à confirmer, seulement pour un changement d'e-mail.
+  newEmail  String?          @map("new_email") @db.VarChar(254)
+  expiresAt DateTime         @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime?        @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, purpose])
+  @@map("user_tokens")
+}
+
+// ==================== F4 : TARIFS ====================
+
+/// Tarif d'un mode de transport à partir d'une date. Une modification ajoute une ligne :
+/// le tarif en vigueur est la ligne la plus récente dont effectiveFrom est passée.
+model PricingRate {
+  id                    String        @id @default(uuid(7)) @db.Uuid
+  transportMode         TransportMode @map("transport_mode")
+  clientRatePerCbm      Decimal       @map("client_rate_per_cbm") @db.Decimal(12, 2)
+  /// Comprise dans le prix client (règle D7 à confirmer par BTS).
+  collectorMarginPerCbm Decimal       @map("collector_margin_per_cbm") @db.Decimal(12, 2)
+  effectiveFrom         DateTime      @default(now()) @map("effective_from") @db.Timestamptz(3)
+  authorId              String        @map("author_id") @db.Uuid
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([transportMode, effectiveFrom(sort: Desc)])
+  @@map("pricing_rates")
+}
+
+// ==================== F5 : CLIENTS ====================
+
+/// Le solde (facturé, payé, reste dû) n'est pas stocké : il est calculé à partir des colis.
+model Client {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  name      String   @db.VarChar(160)
+  phone     String   @db.VarChar(30)
+  email     String?  @db.VarChar(254)
+  address   String?  @db.VarChar(255)
+  agencyId  String   @map("agency_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  agency   Agency    @relation(fields: [agencyId], references: [id], onDelete: Restrict)
+  packages Package[]
+  payments Payment[]
+
+  /// Non unique : plusieurs clients peuvent partager un numéro (contacts d'une même société).
+  @@index([phone])
+  @@index([email])
+  @@index([name])
+  @@index([agencyId])
+  @@map("clients")
+}
+
+// ==================== F6 : COLIS ====================
+
+model Package {
+  id              String        @id @default(uuid(7)) @db.Uuid
+  /// Généré par le serveur.
+  trackingNumber  String        @unique @map("tracking_number") @db.VarChar(32)
+  clientId        String        @map("client_id") @db.Uuid
+  /// Agence qui a enregistré le colis : limite ce qu'un collecteur peut voir.
+  agencyId        String        @map("agency_id") @db.Uuid
+  collectorId     String?       @map("collector_id") @db.Uuid
+  shipmentId      String?       @map("shipment_id") @db.Uuid
+  description     String?       @db.VarChar(500)
+  transportMode   TransportMode @default(sea) @map("transport_mode")
+  originId        String        @map("origin_id") @db.Uuid
+  destinationId   String        @map("destination_id") @db.Uuid
+  lengthCm        Decimal       @map("length_cm") @db.Decimal(8, 2)
+  widthCm         Decimal       @map("width_cm") @db.Decimal(8, 2)
+  heightCm        Decimal       @map("height_cm") @db.Decimal(8, 2)
+  weightKg        Decimal       @map("weight_kg") @db.Decimal(10, 2)
+  cubicMeter      Decimal       @map("cubic_meter") @db.Decimal(10, 4)
+  /// Prix du m³ appliqué à ce colis, figé à l'enregistrement.
+  ratePerCbm      Decimal       @map("rate_per_cbm") @db.Decimal(12, 2)
+  finalPrice      Decimal       @map("final_price") @db.Decimal(12, 2)
+  /// Comprise dans finalPrice, figée à l'enregistrement.
+  collectorMargin Decimal       @map("collector_margin") @db.Decimal(12, 2)
+  status          PackageStatus @default(registered)
+  /// Copie de la somme des parts de paiement du colis (PaymentAllocation), qui reste la
+  /// source de vérité. amountPaid et paymentStatus sont mis à jour dans la même transaction
+  /// que chaque paiement : ils servent au filtrage et au tri des listes sans recalcul.
+  amountPaid      Decimal       @default(0) @map("amount_paid") @db.Decimal(12, 2)
+  paymentStatus   PaymentStatus @default(unpaid) @map("payment_status")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  client             Client              @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  agency             Agency              @relation(fields: [agencyId], references: [id], onDelete: Restrict)
+  origin             Location            @relation("PackageOrigin", fields: [originId], references: [id], onDelete: Restrict)
+  destination        Location            @relation("PackageDestination", fields: [destinationId], references: [id], onDelete: Restrict)
+  collector          User?               @relation("PackageCollector", fields: [collectorId], references: [id], onDelete: Restrict)
+  shipment           Shipment?           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  events             PackageEvent[]
+  paymentAllocations PaymentAllocation[]
+  notifications      Notification[]
+
+  /// Cible de la clé étrangère composée de PaymentAllocation : une part de paiement ne peut
+  /// viser qu'un colis du même client que le paiement.
+  @@unique([id, clientId])
+  @@index([clientId])
+  @@index([shipmentId])
+  @@index([collectorId])
+  @@index([originId])
+  @@index([destinationId])
+  @@index([agencyId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
+  @@index([paymentStatus])
+  @@index([createdAt(sort: Desc)])
+  @@map("packages")
+}
+
+/// Étape du suivi d'un colis. Jamais modifiée : chaque changement de statut ajoute une ligne.
+model PackageEvent {
+  id             String        @id @default(uuid(7)) @db.Uuid
+  packageId      String        @map("package_id") @db.Uuid
+  status         PackageStatus
+  /// Ville de référence, quand l'étape a lieu dans une ville du réseau.
+  locationId     String?       @map("location_id") @db.Uuid
+  /// Précision libre (quai, entrepôt, ville hors réseau).
+  locationDetail String?       @map("location_detail") @db.VarChar(120)
+  comment        String?       @db.VarChar(500)
+  /// Vide pour un événement créé par le système (propagation depuis un conteneur, import).
+  agentId        String?       @map("agent_id") @db.Uuid
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  package  Package   @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  location Location? @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  agent    User?     @relation(fields: [agentId], references: [id], onDelete: Restrict)
+
+  @@index([packageId, createdAt(sort: Desc)])
+  @@index([locationId])
+  @@map("package_events")
+}
+
+// ==================== F8 : PAIEMENTS ====================
+
+/// Écriture comptable : jamais modifiée ni supprimée. Un versement peut régler plusieurs
+/// colis du même client : sa répartition est dans PaymentAllocation. Une erreur se corrige par
+/// une écriture d'annulation (montant négatif) qui pointe vers le paiement annulé.
+model Payment {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  clientId          String        @map("client_id") @db.Uuid
+  amount            Decimal       @db.Decimal(12, 2)
+  method            PaymentMethod
+  reference         String?       @db.VarChar(80)
+  notes             String?       @db.VarChar(500)
+  authorId          String        @map("author_id") @db.Uuid
+  /// Renseigné uniquement sur une écriture d'annulation. Un paiement n'est annulé qu'une fois.
+  reversesPaymentId String?       @unique @map("reverses_payment_id") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  client      Client              @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  author      User                @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  reverses    Payment?            @relation("PaymentReversal", fields: [reversesPaymentId], references: [id], onDelete: Restrict)
+  reversedBy  Payment?            @relation("PaymentReversal")
+  allocations PaymentAllocation[]
+
+  /// Cible de la clé étrangère composée de PaymentAllocation.
+  @@unique([id, clientId])
+  @@index([clientId, createdAt(sort: Desc)])
+  @@index([method, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("payments")
+}
+
+/// Part d'un paiement affectée à un colis. Les clés étrangères composées sur clientId
+/// garantissent que le paiement et le colis appartiennent au même client. La somme des parts
+/// est égale au montant du paiement : le service le vérifie dans la transaction
+/// d'enregistrement, car une contrainte CHECK ne peut pas porter sur plusieurs lignes.
+model PaymentAllocation {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  paymentId String   @map("payment_id") @db.Uuid
+  packageId String   @map("package_id") @db.Uuid
+  clientId  String   @map("client_id") @db.Uuid
+  /// Même signe que le paiement : négatif sur une écriture d'annulation.
+  amount    Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  payment Payment @relation(fields: [paymentId, clientId], references: [id, clientId], onDelete: Restrict)
+  package Package @relation(fields: [packageId, clientId], references: [id, clientId], onDelete: Restrict)
+
+  @@unique([paymentId, packageId])
+  @@index([packageId])
+  @@map("payment_allocations")
+}
+
+// ==================== F9 : CONTENEURS ET LOTS ====================
+
+/// Le volume chargé n'est pas stocké : c'est la somme des volumes des colis affectés.
+model Shipment {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  containerNumber  String         @unique @map("container_number") @db.VarChar(40)
+  transportMode    TransportMode  @map("transport_mode")
+  carrier          String         @db.VarChar(80)
+  originId         String         @map("origin_id") @db.Uuid
+  destinationId    String         @map("destination_id") @db.Uuid
+  status           ShipmentStatus @default(planned)
+  maxVolumeCbm     Decimal        @map("max_volume_cbm") @db.Decimal(10, 2)
+  departureDate    DateTime?      @map("departure_date") @db.Date
+  estimatedArrival DateTime?      @map("estimated_arrival") @db.Date
+  actualArrival    DateTime?      @map("actual_arrival") @db.Date
+  notes            String?        @db.VarChar(500)
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  origin      Location  @relation("ShipmentOrigin", fields: [originId], references: [id], onDelete: Restrict)
+  destination Location  @relation("ShipmentDestination", fields: [destinationId], references: [id], onDelete: Restrict)
+  packages    Package[]
+
+  @@index([status])
+  @@index([originId])
+  @@index([destinationId])
+  @@index([createdAt(sort: Desc)])
+  @@map("shipments")
+}
+
+// ==================== F10 : NOTIFICATIONS ====================
+
+/// Événement affiché au personnel. L'état lu ou non lu est propre à chaque personne
+/// (NotificationRead).
+model Notification {
+  id                String               @id @default(uuid(7)) @db.Uuid
+  category          NotificationCategory
+  title             String               @db.VarChar(160)
+  message           String               @db.VarChar(1000)
+  packageId         String?              @map("package_id") @db.Uuid
+  /// Renseigné seulement pour un e-mail envoyé à un client.
+  deliveryStatus    EmailDeliveryStatus? @map("delivery_status")
+  /// Identifiant du message chez le fournisseur d'e-mails, pour rapprocher ses webhooks.
+  providerMessageId String?              @unique @map("provider_message_id") @db.VarChar(255)
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  package Package?           @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  reads   NotificationRead[]
+
+  @@index([createdAt(sort: Desc)])
+  @@index([category, createdAt(sort: Desc)])
+  @@index([packageId])
+  @@map("notifications")
+}
+
+/// Une ligne par personne qui a lu la notification. Pas de ligne = non lue.
+model NotificationRead {
+  notificationId String   @map("notification_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  readAt         DateTime @default(now()) @map("read_at") @db.Timestamptz(3)
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@id([notificationId, userId])
+  @@index([userId])
+  @@map("notification_reads")
+}
+
+// ==================== F11 : CALCULATEUR (selon la décision D6) ====================
+
+model Quote {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  recipientName String   @map("recipient_name") @db.VarChar(160)
+  destination   String   @db.VarChar(120)
+  lengthCm      Decimal  @map("length_cm") @db.Decimal(8, 2)
+  widthCm       Decimal  @map("width_cm") @db.Decimal(8, 2)
+  heightCm      Decimal  @map("height_cm") @db.Decimal(8, 2)
+  weightKg      Decimal  @map("weight_kg") @db.Decimal(10, 2)
+  cubicMeter    Decimal  @map("cubic_meter") @db.Decimal(10, 4)
+  ratePerCbm    Decimal  @map("rate_per_cbm") @db.Decimal(12, 2)
+  finalPrice    Decimal  @map("final_price") @db.Decimal(12, 2)
+  authorId      String   @map("author_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([createdAt(sort: Desc)])
+  @@map("quotes")
+}
+
+// ==================== IMPORT EXCEL ====================
+
+/// Empreinte des lignes déjà importées sans clé naturelle (paiements, calculs, colis sans
+/// numéro) : un nouvel import du même fichier ignore ces lignes.
+model ImportFingerprint {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  entity      String   @db.VarChar(40)
+  fingerprint String   @db.VarChar(512)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@unique([entity, fingerprint])
+  @@map("import_fingerprints")
+}
+
+// ==================== F13 : JOURNAL D'AUDIT ====================
+
+/// Trace des actions sensibles. before et after sont des instantanés de la ressource : leur
+/// forme dépend de la ressource, d'où le type Json.
+model AuditLog {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  actorId      String?  @map("actor_id") @db.Uuid
+  action       String   @db.VarChar(60)
+  resourceType String   @map("resource_type") @db.VarChar(40)
+  resourceId   String   @map("resource_id") @db.VarChar(64)
+  before       Json?
+  after        Json?
+  requestId    String?  @map("request_id") @db.VarChar(64)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([resourceType, resourceId])
+  @@index([actorId])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}

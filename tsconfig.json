@@ -1,0 +1,34 @@
+{
+  // Configuration utilisée par l'éditeur, `npm run typecheck` et les tests.
+  // Le build de production utilise tsconfig.build.json, qui étend ce fichier.
+  "compilerOptions": {
+    // Node.js moderne en modules ES (import / export), comme "type": "module" dans package.json.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": ["node"],
+
+    // Vérifications strictes : elles attrapent les erreurs avant l'exécution.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // Imports explicites : `import type` pour les types, extension .js dans les chemins relatifs.
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noUncheckedSideEffectImports": true,
+    "resolveJsonModule": true,
+
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "prisma", "tests", "*.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}
