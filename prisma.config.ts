@@ -10,7 +10,9 @@ export default defineConfig({
     path: 'prisma/migrations',
     seed: 'tsx prisma/seed.ts',
   },
+  // La CLI (migrations) passe par la connexion directe : le pooler de Neon (PgBouncer) gère mal
+  // les verrous de Prisma Migrate. Sans DIRECT_URL, on retombe sur DATABASE_URL.
   datasource: {
-    url: process.env['DATABASE_URL'],
+    url: process.env['DIRECT_URL'] || process.env['DATABASE_URL'],
   },
 });
