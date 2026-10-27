@@ -15,3 +15,6 @@ src/generated/
 *.log
 .DS_Store
 Thumbs.db
+
+# Accès des comptes de démonstration (npm run db:seed:demo)
+.dev-accounts.txt
