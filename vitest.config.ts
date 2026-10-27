@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts', 'src/**/*.test.ts'],
+    // Chaque fichier de test démarre sa propre base PGlite (PostgreSQL en WebAssembly), gourmande
+    // en mémoire : au-delà de 2 en parallèle, des processus de test s'arrêtent faute de mémoire.
+    maxWorkers: 2,
     // Valeurs factices : la configuration est validée au chargement, même pour les tests
     // qui ne touchent pas à la base. Une base de test dédiée sera ajoutée avec les premiers modèles.
     env: {

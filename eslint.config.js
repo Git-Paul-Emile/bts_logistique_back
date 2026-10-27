@@ -7,7 +7,7 @@ export default tseslint.config(
   { ignores: ['dist', 'coverage', 'src/generated', 'prisma/migrations'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
-    files: ['**/*.ts'],
+    files: ['**/*.ts', '**/*.tsx'],
     languageOptions: {
       ecmaVersion: 2023,
       globals: globals.node,

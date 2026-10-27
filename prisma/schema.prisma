@@ -1,5 +1,4 @@
 // Schéma de la base de données.
-// Tables issues de la partie 2 de documents/FEUILLE-DE-ROUTE-PRODUCTION.md (F1 à F13).
 // L'URL de connexion est définie dans prisma.config.ts, à partir de la variable DATABASE_URL.
 //
 // Conventions :
@@ -102,6 +101,26 @@ enum EmailDeliveryStatus {
   @@map("email_delivery_status")
 }
 
+enum EmailKind {
+  password_reset
+  invitation
+  email_change
+  package_registered
+  package_status
+  tracking_link
+
+  @@map("email_kind")
+}
+
+enum EmailOutboxStatus {
+  pending
+  sending
+  sent
+  failed
+
+  @@map("email_outbox_status")
+}
+
 // ==================== RÉFÉRENCES : LIEUX ET AGENCES ====================
 
 /// Ville du réseau BTS : hub de départ, destination, ou les deux.
@@ -177,7 +196,6 @@ model User {
   pricingRates      PricingRate[]
   notificationReads NotificationRead[]
   auditLogs         AuditLog[]
-  quotes            Quote[]
 
   @@index([role, active])
   @@index([agencyId])
@@ -230,7 +248,7 @@ model PricingRate {
   id                    String        @id @default(uuid(7)) @db.Uuid
   transportMode         TransportMode @map("transport_mode")
   clientRatePerCbm      Decimal       @map("client_rate_per_cbm") @db.Decimal(12, 2)
-  /// Comprise dans le prix client (règle D7 à confirmer par BTS).
+  /// Comprise dans le prix client (règle validée par BTS).
   collectorMarginPerCbm Decimal       @map("collector_margin_per_cbm") @db.Decimal(12, 2)
   effectiveFrom         DateTime      @default(now()) @map("effective_from") @db.Timestamptz(3)
   authorId              String        @map("author_id") @db.Uuid
@@ -270,36 +288,39 @@ model Client {
 // ==================== F6 : COLIS ====================
 
 model Package {
-  id              String        @id @default(uuid(7)) @db.Uuid
+  id                    String        @id @default(uuid(7)) @db.Uuid
   /// Généré par le serveur.
-  trackingNumber  String        @unique @map("tracking_number") @db.VarChar(32)
-  clientId        String        @map("client_id") @db.Uuid
+  trackingNumber        String        @unique @map("tracking_number") @db.VarChar(32)
+  clientId              String        @map("client_id") @db.Uuid
   /// Agence qui a enregistré le colis : limite ce qu'un collecteur peut voir.
-  agencyId        String        @map("agency_id") @db.Uuid
-  collectorId     String?       @map("collector_id") @db.Uuid
-  shipmentId      String?       @map("shipment_id") @db.Uuid
-  description     String?       @db.VarChar(500)
-  transportMode   TransportMode @default(sea) @map("transport_mode")
-  originId        String        @map("origin_id") @db.Uuid
-  destinationId   String        @map("destination_id") @db.Uuid
-  lengthCm        Decimal       @map("length_cm") @db.Decimal(8, 2)
-  widthCm         Decimal       @map("width_cm") @db.Decimal(8, 2)
-  heightCm        Decimal       @map("height_cm") @db.Decimal(8, 2)
-  weightKg        Decimal       @map("weight_kg") @db.Decimal(10, 2)
-  cubicMeter      Decimal       @map("cubic_meter") @db.Decimal(10, 4)
+  agencyId              String        @map("agency_id") @db.Uuid
+  collectorId           String?       @map("collector_id") @db.Uuid
+  shipmentId            String?       @map("shipment_id") @db.Uuid
+  description           String?       @db.VarChar(500)
+  transportMode         TransportMode @default(sea) @map("transport_mode")
+  originId              String        @map("origin_id") @db.Uuid
+  destinationId         String        @map("destination_id") @db.Uuid
+  lengthCm              Decimal       @map("length_cm") @db.Decimal(8, 2)
+  widthCm               Decimal       @map("width_cm") @db.Decimal(8, 2)
+  heightCm              Decimal       @map("height_cm") @db.Decimal(8, 2)
+  weightKg              Decimal       @map("weight_kg") @db.Decimal(10, 2)
+  cubicMeter            Decimal       @map("cubic_meter") @db.Decimal(10, 4)
   /// Prix du m³ appliqué à ce colis, figé à l'enregistrement.
-  ratePerCbm      Decimal       @map("rate_per_cbm") @db.Decimal(12, 2)
-  finalPrice      Decimal       @map("final_price") @db.Decimal(12, 2)
+  ratePerCbm            Decimal       @map("rate_per_cbm") @db.Decimal(12, 2)
+  finalPrice            Decimal       @map("final_price") @db.Decimal(12, 2)
   /// Comprise dans finalPrice, figée à l'enregistrement.
-  collectorMargin Decimal       @map("collector_margin") @db.Decimal(12, 2)
-  status          PackageStatus @default(registered)
+  collectorMargin       Decimal       @map("collector_margin") @db.Decimal(12, 2)
+  /// Marge au m³ de la grille au moment de l'enregistrement, figée : la marge du colis est
+  /// recalculée avec ce taux si ses dimensions sont corrigées.
+  collectorMarginPerCbm Decimal       @map("collector_margin_per_cbm") @db.Decimal(12, 2)
+  status                PackageStatus @default(registered)
   /// Copie de la somme des parts de paiement du colis (PaymentAllocation), qui reste la
   /// source de vérité. amountPaid et paymentStatus sont mis à jour dans la même transaction
   /// que chaque paiement : ils servent au filtrage et au tri des listes sans recalcul.
-  amountPaid      Decimal       @default(0) @map("amount_paid") @db.Decimal(12, 2)
-  paymentStatus   PaymentStatus @default(unpaid) @map("payment_status")
-  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  amountPaid            Decimal       @default(0) @map("amount_paid") @db.Decimal(12, 2)
+  paymentStatus         PaymentStatus @default(unpaid) @map("payment_status")
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   client             Client              @relation(fields: [clientId], references: [id], onDelete: Restrict)
   agency             Agency              @relation(fields: [agencyId], references: [id], onDelete: Restrict)
@@ -449,6 +470,7 @@ model Notification {
 
   package Package?           @relation(fields: [packageId], references: [id], onDelete: Restrict)
   reads   NotificationRead[]
+  email   EmailOutbox?
 
   @@index([createdAt(sort: Desc)])
   @@index([category, createdAt(sort: Desc)])
@@ -470,26 +492,32 @@ model NotificationRead {
   @@map("notification_reads")
 }
 
-// ==================== F11 : CALCULATEUR (selon la décision D6) ====================
+/// Boîte d'envoi des e-mails : chaque e-mail est inscrit dans la même transaction que l'action
+/// qui le déclenche, puis envoyé par le répartiteur, avec reprises en cas d'échec.
+model EmailOutbox {
+  id                String            @id @default(uuid(7)) @db.Uuid
+  kind              EmailKind
+  recipient         String            @db.VarChar(254)
+  /// Données du modèle d'e-mail, dont la forme dépend de `kind`. Vidé une fois l'e-mail envoyé
+  /// ou abandonné : un lien contenant un jeton ne reste en base que le temps de l'envoi.
+  payload           Json?
+  status            EmailOutboxStatus @default(pending)
+  attempts          Int               @default(0)
+  nextAttemptAt     DateTime          @default(now()) @map("next_attempt_at") @db.Timestamptz(3)
+  /// Début de l'envoi en cours : un envoi bloqué (processus arrêté) est repris après un délai.
+  lockedAt          DateTime?         @map("locked_at") @db.Timestamptz(3)
+  lastError         String?           @map("last_error") @db.VarChar(500)
+  /// Identifiant du message chez Resend, pour rapprocher ses webhooks.
+  providerMessageId String?           @unique @map("provider_message_id") @db.VarChar(255)
+  /// Notification du personnel dont l'état d'envoi suit celui de cet e-mail.
+  notificationId    String?           @unique @map("notification_id") @db.Uuid
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  sentAt            DateTime?         @map("sent_at") @db.Timestamptz(3)
 
-model Quote {
-  id            String   @id @default(uuid(7)) @db.Uuid
-  recipientName String   @map("recipient_name") @db.VarChar(160)
-  destination   String   @db.VarChar(120)
-  lengthCm      Decimal  @map("length_cm") @db.Decimal(8, 2)
-  widthCm       Decimal  @map("width_cm") @db.Decimal(8, 2)
-  heightCm      Decimal  @map("height_cm") @db.Decimal(8, 2)
-  weightKg      Decimal  @map("weight_kg") @db.Decimal(10, 2)
-  cubicMeter    Decimal  @map("cubic_meter") @db.Decimal(10, 4)
-  ratePerCbm    Decimal  @map("rate_per_cbm") @db.Decimal(12, 2)
-  finalPrice    Decimal  @map("final_price") @db.Decimal(12, 2)
-  authorId      String   @map("author_id") @db.Uuid
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  notification Notification? @relation(fields: [notificationId], references: [id], onDelete: Restrict)
 
-  author User @relation(fields: [authorId], references: [id], onDelete: Restrict)
-
-  @@index([createdAt(sort: Desc)])
-  @@map("quotes")
+  @@index([status, nextAttemptAt])
+  @@map("email_outbox")
 }
 
 // ==================== IMPORT EXCEL ====================

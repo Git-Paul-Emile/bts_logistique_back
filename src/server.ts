@@ -3,11 +3,14 @@ import { env } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { prisma } from './lib/prisma.js';
 import { createApp } from './app.js';
+import { emailDispatcher } from './infrastructure/email/emailDispatcher.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 const server = createApp().listen(env.PORT, () => {
   logger.info(`API démarrée sur http://localhost:${env.PORT} (${env.NODE_ENV})`);
+  // Envoi des e-mails de la boîte d'envoi, dans le même processus que l'API.
+  emailDispatcher.start();
 });
 
 // Arrêt propre : on termine les requêtes en cours et on ferme la base avant de quitter.
@@ -20,6 +23,7 @@ function shutdown(signal: NodeJS.Signals) {
   }, SHUTDOWN_TIMEOUT_MS);
   forceExit.unref();
 
+  emailDispatcher.stop();
   server.close(async () => {
     await prisma.$disconnect();
     logger.info('Serveur arrêté.');

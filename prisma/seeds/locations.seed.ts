@@ -1,5 +1,4 @@
-// Villes du réseau BTS et agence de chacune. Reprend les listes du front
-// (BTS_ORIGINS et BTS_DESTINATIONS dans front/src/types/index.ts).
+// Villes du réseau BTS et agence de chacune. Source unique : le front les lit par GET /locations.
 // Relançable sans risque : chaque ligne est retrouvée par son code (upsert).
 import { prisma } from '../../src/lib/prisma.js';
 import type { Seeder } from './seeder.js';

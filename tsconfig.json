@@ -25,10 +25,13 @@
     "noUncheckedSideEffectImports": true,
     "resolveJsonModule": true,
 
+    // Modèles d'e-mails écrits en React (React Email), sans import explicite de React.
+    "jsx": "react-jsx",
+
     "sourceMap": true,
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "prisma", "tests", "*.config.ts"],
+  "include": ["src", "prisma", "scripts", "tests", "*.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

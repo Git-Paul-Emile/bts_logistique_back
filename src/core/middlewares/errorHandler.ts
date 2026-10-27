@@ -9,6 +9,8 @@ import { Prisma } from '../../generated/prisma/client.js';
 // Liste complète : https://www.prisma.io/docs/orm/reference/error-reference
 const PRISMA_UNIQUE_VIOLATION = 'P2002';
 const PRISMA_RECORD_NOT_FOUND = 'P2025';
+/** Deux transactions ont modifié les mêmes données en même temps : l'une est annulée. */
+const PRISMA_WRITE_CONFLICT = 'P2034';
 
 /**
  * Middleware d'erreur unique, placé en dernier dans app.ts.
@@ -36,6 +38,17 @@ export const errorHandler: ErrorRequestHandler = (error: unknown, req, res, _nex
       res
         .status(StatusCodes.CONFLICT)
         .json(errorBody('ALREADY_EXISTS', 'Cette valeur est déjà utilisée.'));
+      return;
+    }
+    if (error.code === PRISMA_WRITE_CONFLICT) {
+      res
+        .status(StatusCodes.CONFLICT)
+        .json(
+          errorBody(
+            'CONCURRENT_UPDATE',
+            'Ces données ont été modifiées en même temps par une autre personne. Réessayez.'
+          )
+        );
       return;
     }
     if (error.code === PRISMA_RECORD_NOT_FOUND) {
